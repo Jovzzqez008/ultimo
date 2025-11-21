@@ -476,6 +476,171 @@ async function processSellSignals() {
   }
 }
 
+// 🆕 EMERGENCY EXIT para posiciones con datos rotos (P&L no calculable)
+async function emergencyExit(position, currentPrice, approxSolValue) {
+  try {
+    const mint = position.mint;
+    const tokensAmount = parseInt(position.tokensAmount || position.tokenAmount || '0');
+
+    if (!tokensAmount || tokensAmount <= 0) {
+      console.log(
+        `   ⚠️ [EMERGENCY EXIT] No tokens balance stored, cleaning Redis for ${mint.slice(
+          0,
+          8,
+        )}...`,
+      );
+      await redis.srem('open_positions', mint);
+      await redis.persist(`position:${mint}`);
+      return;
+    }
+
+    // Obtener info de precio / graduación
+    const priceInfo = await priceService.getPrice(mint, { forceFresh: true });
+    const exitPrice =
+      priceInfo && priceInfo.price ? priceInfo.price : currentPrice;
+    const isGraduatedFlag = priceInfo && priceInfo.graduated;
+
+    // Delay opcional para Jupiter tras graduación
+    let useJupiter = isGraduatedFlag;
+    const gradTimeStr = position.graduationTime;
+    const gradDelaySec = Number(
+      process.env.JUPITER_GRAD_DELAY_SEC || '0',
+    );
+
+    if (useJupiter && gradTimeStr && gradDelaySec > 0) {
+      const gradTime = parseInt(gradTimeStr);
+      const elapsedSec = (Date.now() - gradTime) / 1000;
+
+      if (elapsedSec < gradDelaySec) {
+        const waitSec = Math.max(0, gradDelaySec - elapsedSec);
+        console.log(
+          `\n⏳ [EMERGENCY EXIT] Jupiter warmup: waiting ${waitSec.toFixed(
+            1,
+          )}s...`,
+        );
+        await sleep(waitSec * 1000);
+      }
+    }
+
+    let sellResult;
+    let executorLabel;
+
+    if (!useJupiter) {
+      // VENDER en Pump.fun via PumpPortal
+      sellResult = await pumpPortal.sellToken(
+        mint,
+        tokensAmount,
+        Number(process.env.COPY_SLIPPAGE || '10'),
+        Number(process.env.PRIORITY_FEE || '0.0005'),
+      );
+      executorLabel = 'Pump.fun (PumpPortal Local API - 1.75%)';
+    } else {
+      // VENDER en Jupiter
+      sellResult = await jupiterService.swapToken(
+        mint,
+        tokensAmount,
+        Number(process.env.JUPITER_SLIPPAGE_BPS || '500'),
+      );
+      executorLabel = 'Jupiter Ultra Swap (~0.3%)';
+
+      const errorMsg = sellResult && sellResult.error ? sellResult.error : '';
+      const routeError =
+        !sellResult.success &&
+        (errorMsg.includes('Route not found') ||
+          errorMsg.includes('COULD_NOT_FIND_ANY_ROUTE') ||
+          errorMsg.includes('Could not find any route') ||
+          errorMsg.includes('custom program error: 0x1789'));
+
+      if (routeError) {
+        console.log(
+          '\n⚠️ [EMERGENCY EXIT] Jupiter failed, falling back to PumpPortal.',
+        );
+        sellResult = await pumpPortal.sellToken(
+          mint,
+          tokensAmount,
+          Number(process.env.COPY_SLIPPAGE || '10'),
+          Number(process.env.PRIORITY_FEE || '0.0005'),
+        );
+        executorLabel = 'Pump.fun (PumpPortal Local API - 1.75%)';
+      }
+    }
+
+    if (!sellResult.success) {
+      console.log(
+        `❌ [EMERGENCY EXIT] SELL FAILED for ${mint.slice(
+          0,
+          8,
+        )}...: ${sellResult.error}`,
+      );
+      return;
+    }
+
+    const mode = DRY_RUN ? '📄 PAPER' : '💰 LIVE';
+    const solReceived =
+      sellResult.solReceived ?? sellResult.expectedSOL ?? 0;
+
+    console.log(
+      `${mode} [EMERGENCY EXIT] SOLD ${tokensAmount} tokens of ${mint.slice(
+        0,
+        8,
+      )}... via ${executorLabel}`,
+    );
+    console.log(`   SOL received: ${solReceived}`);
+    console.log(`   Signature: ${sellResult.signature}\n`);
+
+    // Cerrar posición en Redis SIN PnL (datos rotos)
+    await redis.hmset(`position:${mint}`, {
+      status: 'closed',
+      exitPrice: exitPrice.toString(),
+      exitTime: Date.now().toString(),
+      solReceived: solReceived.toString(),
+      reason: 'emergency_exit_invalid_fields',
+      exitSignature: sellResult.signature,
+    });
+
+    await redis.srem('open_positions', mint);
+    await redis.persist(`position:${mint}`);
+
+    // Guardar en histórico básico
+    const today = new Date().toISOString().split('T')[0];
+    const tradeRecord = {
+      ...position,
+      exitPrice,
+      solReceived,
+      reason: 'emergency_exit_invalid_fields',
+      closedAt: Date.now(),
+      emergency: true,
+    };
+    await redis.rpush(`trades:${today}`, JSON.stringify(tradeRecord));
+    await redis.expire(`trades:${today}`, 86400 * 30);
+
+    // Telegram opcional
+    if (process.env.TELEGRAM_OWNER_CHAT_ID) {
+      try {
+        await sendTelegramAlert(
+          process.env.TELEGRAM_OWNER_CHAT_ID,
+          `⚠️ EMERGENCY EXIT (invalid PnL fields)\n\n` +
+            `Token: ${mint.slice(0, 16)}...\n` +
+            `Executor: ${executorLabel}\n` +
+            `Mode: ${mode}\n` +
+            `Exit price (approx): $${exitPrice.toFixed(10)}\n` +
+            `SOL received: ${solReceived}\n` +
+            `\n` +
+            `The position had inconsistent data in Redis, so it was closed automatically to free the slot.`,
+          false,
+        );
+      } catch (e) {
+        console.log('⚠️ Telegram emergency exit notification failed');
+      }
+    }
+  } catch (error) {
+    console.error(
+      '❌ [EMERGENCY EXIT] Unexpected error while closing broken position:',
+      error.message,
+    );
+  }
+}
+
 async function monitorOpenPositions() {
   let lastUpdate = {};
 
@@ -493,7 +658,11 @@ async function monitorOpenPositions() {
           continue;
         }
 
-        const tokensAmount = parseInt(position.tokensAmount);
+        // Tokens de la posición
+        const tokensAmount = Number(
+          position.tokensAmount || position.tokenAmount || '0',
+        );
+
         const valueData = await calculateCurrentValue(
           position.mint,
           tokensAmount,
@@ -513,6 +682,27 @@ async function monitorOpenPositions() {
         const executor = valueData.graduated
           ? 'jupiter'
           : 'pumpportal';
+
+        // 🔎 VALIDAR CAMPOS ANTES DE CALCULAR PnL
+        const entryPriceNum = Number(position.entryPrice);
+        const solSpentNum = Number(position.solAmount || position.solSpent);
+
+        const hasMissingFields =
+          !entryPriceNum ||
+          !solSpentNum ||
+          !tokensAmount ||
+          !currentPrice;
+
+        if (hasMissingFields) {
+          console.log(
+            `\n⚠️ Invalid PnL fields for ${position.mint.slice(
+              0,
+              8,
+            )}... → EMERGENCY EXIT`,
+          );
+          await emergencyExit(position, currentPrice, valueData.solValue);
+          continue;
+        }
 
         // ✅ CALCULAR PnL UNREALIZADO CORRECTO
         const unrealizedPnL = PnLCalculator.calculateUnrealizedPnL(
