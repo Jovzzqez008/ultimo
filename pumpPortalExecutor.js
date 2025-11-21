@@ -21,16 +21,16 @@ export class PumpPortalExecutor {
     this.connection = new Connection(this.rpcUrl, {
       commitment: 'confirmed',
       skipPreflight: false,
-      maxRetries: 3
+      maxRetries: 3,
     });
 
     // ✅ Local API endpoint (NO necesita API key)
     this.baseUrl = 'https://pumpportal.fun/api/trade-local';
 
-    console.log(`🔷 PumpPortal Executor (LOCAL API - 0.5% fee)`);
+    console.log('🔷 PumpPortal Executor (LOCAL API - 0.5% fee)');
     console.log(`   Wallet: ${this.wallet.publicKey.toString()}`);
     console.log(`   Mode: ${this.dryRun ? '📄 PAPER' : '💰 LIVE'}`);
-    console.log(`   ✅ Using your own private key`);
+    console.log('   ✅ Using your own private key');
   }
 
   // ------------------------------------------------------------------------
@@ -38,7 +38,7 @@ export class PumpPortalExecutor {
   // ------------------------------------------------------------------------
   async buyToken(mint, solAmount, slippage = 10, priorityFee = 0.0005) {
     try {
-      console.log(`\n🟦 BUY REQUEST (Local API)`);
+      console.log('\n🟦 BUY REQUEST (Local API)');
       console.log(`   Mint: ${mint.slice(0, 12)}...`);
       console.log(`   Amount: ${solAmount} SOL`);
       console.log(`   Slippage: ${slippage}%`);
@@ -54,45 +54,45 @@ export class PumpPortalExecutor {
         action: 'buy',
         mint,
         amount: solAmount,
-        denominatedInSol: 'true',
+        denominatedInSol: 'true', // cantidad en SOL
         slippage,
         priorityFee,
-        pool: 'pump'
+        pool: 'pump',
       };
 
-      console.log(`   📤 Requesting unsigned transaction...`);
+      console.log('   📤 Requesting unsigned transaction...');
 
-      // ✅ Solicitar transacción SIN FIRMAR
-      const response = await axios.post(
-        this.baseUrl,
-        payload,
-        { 
-          timeout: 30000,
-          responseType: 'arraybuffer' // Importante: recibir como buffer
-        }
-      );
+      const response = await axios.post(this.baseUrl, payload, {
+        timeout: 30000,
+        responseType: 'arraybuffer', // Importante: recibir como buffer
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
 
       if (response.status !== 200 || !response.data) {
-        throw new Error(`API Error: ${response.statusText}`);
+        throw new Error(
+          `API Error (BUY): status=${response.status} ${response.statusText}`,
+        );
       }
 
-      console.log(`   ✅ Unsigned transaction received`);
+      console.log('   ✅ Unsigned transaction received');
 
       // ✅ Deserializar la transacción
       const txBuffer = new Uint8Array(response.data);
       const tx = VersionedTransaction.deserialize(txBuffer);
 
-      console.log(`   🔐 Signing with your private key...`);
+      console.log('   🔐 Signing with your private key...');
 
       // ✅ Firmar con TU private key
       tx.sign([this.wallet]);
 
-      console.log(`   📡 Sending to RPC...`);
+      console.log('   📡 Sending to RPC...');
 
       // ✅ Enviar con TU RPC
       const signature = await this.connection.sendTransaction(tx, {
         skipPreflight: false,
-        maxRetries: 3
+        maxRetries: 3,
       });
 
       console.log(`   ✅ Transaction sent: ${signature.slice(0, 20)}...`);
@@ -113,9 +113,8 @@ export class PumpPortalExecutor {
         tokensReceived: txDetails?.tokensReceived || 0,
         timestamp: Date.now(),
         fee: '0.5%', // Local API fee
-        api: 'local'
+        api: 'local',
       };
-
     } catch (err) {
       console.error(`❌ BUY FAILED: ${err.message}`);
       return {
@@ -132,54 +131,65 @@ export class PumpPortalExecutor {
   // ------------------------------------------------------------------------
   async sellToken(mint, amountTokens, slippage = 10, priorityFee = 0.0005) {
     try {
-      console.log(`\n🟥 SELL REQUEST (Local API)`);
+      console.log('\n🟥 SELL REQUEST (Local API)');
       console.log(`   Mint: ${mint.slice(0, 12)}...`);
-      console.log(`   Amount: ${amountTokens} tokens`);
+      console.log(`   Requested amount (debug): ${amountTokens} tokens`);
       console.log(`   Slippage: ${slippage}%`);
 
       if (this.dryRun) {
         return this.simulateSell(mint, amountTokens);
       }
 
+      // 🔥 IMPORTANTE:
+      // Siempre vendemos el 100% de los tokens en la wallet usando la sintaxis "100%"
+      // de PumpPortal. Esto evita problemas con decimales y balances desincronizados.
+      const sellAmountField =
+        typeof amountTokens === 'string' && amountTokens.trim().endsWith('%')
+          ? amountTokens
+          : '100%';
+
+      console.log(`   🧮 Effective amount sent to API: ${sellAmountField} (sell all)`);
+
       // ✅ Payload para Local API
       const payload = {
         publicKey: this.wallet.publicKey.toBase58(),
         action: 'sell',
         mint,
-        amount: amountTokens,
-        denominatedInSol: 'false', // Vender por cantidad de tokens
+        amount: sellAmountField, // "100%" → vende TODO
+        denominatedInSol: 'false', // tokens / porcentaje de tokens
         slippage,
         priorityFee,
-        pool: 'pump'
+        pool: 'pump',
       };
 
-      console.log(`   📤 Requesting unsigned transaction...`);
+      console.log('   📤 Requesting unsigned transaction...');
 
-      const response = await axios.post(
-        this.baseUrl,
-        payload,
-        { 
-          timeout: 30000,
-          responseType: 'arraybuffer'
-        }
-      );
+      const response = await axios.post(this.baseUrl, payload, {
+        timeout: 30000,
+        responseType: 'arraybuffer',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
 
       if (response.status !== 200 || !response.data) {
-        throw new Error(`API Error: ${response.statusText}`);
+        throw new Error(
+          `API Error (SELL): status=${response.status} ${response.statusText}`,
+        );
       }
 
-      console.log(`   ✅ Unsigned transaction received`);
+      console.log('   ✅ Unsigned transaction received');
 
       const txBuffer = new Uint8Array(response.data);
       const tx = VersionedTransaction.deserialize(txBuffer);
 
-      console.log(`   🔐 Signing with your private key...`);
+      console.log('   🔐 Signing with your private key...');
       tx.sign([this.wallet]);
 
-      console.log(`   📡 Sending to RPC...`);
+      console.log('   📡 Sending to RPC...');
       const signature = await this.connection.sendTransaction(tx, {
         skipPreflight: false,
-        maxRetries: 3
+        maxRetries: 3,
       });
 
       console.log(`   ✅ Transaction sent: ${signature.slice(0, 20)}...`);
@@ -193,13 +203,14 @@ export class PumpPortalExecutor {
         action: 'sell',
         mint,
         signature,
-        tokensSold: amountTokens,
+        // Informativo: lo pedido + lo que se detectó on-chain
+        requestedTokens: amountTokens,
+        tokensSold: txDetails?.tokensSold ?? txDetails?.tokensReceived ?? 0,
         solReceived: txDetails?.solReceived || 0,
         timestamp: Date.now(),
         fee: '0.5%',
-        api: 'local'
+        api: 'local',
       };
-
     } catch (err) {
       console.error(`❌ SELL FAILED: ${err.message}`);
       return {
@@ -228,11 +239,27 @@ export class PumpPortalExecutor {
       signature: this.fakeSignature(),
       timestamp: Date.now(),
       fee: '0.5%',
-      api: 'local'
+      api: 'local',
     };
   }
 
   simulateSell(mint, amountTokens) {
+    // Si viene "100%" no sabemos el balance, así que solo devolvemos algo simbólico
+    if (typeof amountTokens === 'string' && amountTokens.trim().endsWith('%')) {
+      return {
+        success: true,
+        simulated: true,
+        action: 'sell',
+        mint,
+        tokensSold: amountTokens,
+        solReceived: 0,
+        signature: this.fakeSignature(),
+        timestamp: Date.now(),
+        fee: '0.5%',
+        api: 'local',
+      };
+    }
+
     const avgPrice = 0.000001;
     const sol = amountTokens * avgPrice;
 
@@ -246,7 +273,7 @@ export class PumpPortalExecutor {
       signature: this.fakeSignature(),
       timestamp: Date.now(),
       fee: '0.5%',
-      api: 'local'
+      api: 'local',
     };
   }
 
@@ -254,8 +281,8 @@ export class PumpPortalExecutor {
   // HELPERS
   // ------------------------------------------------------------------------
   async waitForConfirmation(signature) {
-    console.log(`   ⏳ Waiting for confirmation...`);
-    
+    console.log('   ⏳ Waiting for confirmation...');
+
     for (let i = 0; i < 30; i++) {
       try {
         const status = await this.connection.getSignatureStatus(signature);
@@ -274,7 +301,7 @@ export class PumpPortalExecutor {
       await new Promise((r) => setTimeout(r, 1000));
     }
 
-    console.warn(`   ⚠️ Confirmation timeout (may still succeed)`);
+    console.warn('   ⚠️ Confirmation timeout (may still succeed)');
     return false;
   }
 
@@ -282,7 +309,7 @@ export class PumpPortalExecutor {
     try {
       const tx = await this.connection.getTransaction(signature, {
         maxSupportedTransactionVersion: 0,
-        commitment: 'confirmed'
+        commitment: 'confirmed',
       });
       return this.parseTx(tx);
     } catch (err) {
@@ -294,32 +321,43 @@ export class PumpPortalExecutor {
   parseTx(tx) {
     if (!tx || !tx.meta) return {};
 
-    let tokensReceived = 0;
+    let tokensDelta = 0;
     let solReceived = 0;
 
-    // Parsear cambios de tokens
-    if (tx.meta?.postTokenBalances && tx.meta?.preTokenBalances) {
+    // Parsear cambios de tokens (suma de todos los cambios)
+    if (tx.meta.postTokenBalances && tx.meta.preTokenBalances) {
       for (const postBal of tx.meta.postTokenBalances) {
         const preBal = tx.meta.preTokenBalances.find(
-          p => p.accountIndex === postBal.accountIndex
+          (p) => p.accountIndex === postBal.accountIndex,
         );
 
         const preAmount = preBal?.uiTokenAmount?.uiAmount || 0;
         const postAmount = postBal?.uiTokenAmount?.uiAmount || 0;
 
-        tokensReceived += (postAmount - preAmount);
+        tokensDelta += postAmount - preAmount;
       }
     }
 
-    // Parsear cambios de SOL
-    if (tx.meta?.postBalances && tx.meta?.preBalances) {
+    // Parsear cambios de SOL para la wallet
+    if (tx.meta.postBalances && tx.meta.preBalances) {
       const walletPubkey = this.wallet.publicKey.toBase58();
-      
-      const walletIndex = tx.transaction.message.staticAccountKeys?.findIndex(
-        k => k.toBase58() === walletPubkey
-      ) ?? tx.transaction.message.accountKeys?.findIndex(
-        k => k.toBase58() === walletPubkey
-      ) ?? -1;
+
+      const staticKeys = tx.transaction.message.staticAccountKeys;
+      const legacyKeys = tx.transaction.message.accountKeys;
+
+      let walletIndex = -1;
+
+      if (Array.isArray(staticKeys) && staticKeys.length > 0) {
+        walletIndex = staticKeys.findIndex(
+          (k) => k.toBase58 && k.toBase58() === walletPubkey,
+        );
+      }
+
+      if (walletIndex === -1 && Array.isArray(legacyKeys)) {
+        walletIndex = legacyKeys.findIndex(
+          (k) => k.toBase58 && k.toBase58() === walletPubkey,
+        );
+      }
 
       if (walletIndex >= 0) {
         const preSOL = (tx.meta.preBalances[walletIndex] || 0) / 1e9;
@@ -329,14 +367,15 @@ export class PumpPortalExecutor {
     }
 
     return {
-      tokensReceived: Math.abs(tokensReceived),
-      solReceived: Math.abs(solReceived),
+      tokensReceived: Math.abs(tokensDelta),
+      tokensSold: tokensDelta < 0 ? Math.abs(tokensDelta) : 0,
+      solReceived: solReceived,
     };
   }
 
   fakeSignature() {
     const arr = new Uint8Array(64).map(() =>
-      Math.floor(Math.random() * 256)
+      Math.floor(Math.random() * 256),
     );
     return bs58.encode(arr);
   }
