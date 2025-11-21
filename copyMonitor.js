@@ -706,14 +706,24 @@ async function executeSell(position, currentPrice, _currentSolValue, reason) {
       // 🔥 CORRECCIÓN: Verificar DRY_RUN antes de llamar a Jupiter
       if (DRY_RUN) {
         console.log(`\n📄 SIMULATING JUPITER SELL (DRY RUN)`);
+
+        // ✅ USAR PRICE COHERENTE
+        const estimatedSolReceived = tokensAmount * exitPrice * 0.997; // 0.3% fee
+        const priorityFee = Number(process.env.PRIORITY_FEE || '0.0005');
+        const netReceived = estimatedSolReceived - priorityFee;
+
         sellResult = {
           success: true,
           signature: 'simulated_jupiter_tx_' + Date.now(),
-          solReceived: tokensAmount * exitPrice, // Estimado sin fees para simulación
-          expectedSOL: tokensAmount * exitPrice,
+          solReceived: Math.max(netReceived, 0),
+          expectedSOL: estimatedSolReceived,
           priceImpact: 0,
           tokenAmount: tokensAmount
         };
+
+        console.log(`   💰 Estimated SOL: ${estimatedSolReceived.toFixed(6)}`);
+        console.log(`   💸 Priority Fee: -${priorityFee.toFixed(6)}`);
+        console.log(`   ✅ Net: ${netReceived.toFixed(6)}`);
       } else {
         // Solo si NO es DRY_RUN, llamamos a la API real
         sellResult = await jupiterService.swapToken(
@@ -726,40 +736,54 @@ async function executeSell(position, currentPrice, _currentSolValue, reason) {
 
     if (sellResult.success) {
       const mode = DRY_RUN ? '📄 PAPER' : '💰 LIVE';
+
+      // ✅ USAR solReceived DEL RESULTADO (NO recalcular)
       const solReceived =
         sellResult.solReceived ?? sellResult.expectedSOL ?? 0;
 
       console.log(`${mode} SELL EXECUTED via ${executorLabel}`);
-      console.log(`   SOL received: ${solReceived}`);
+      console.log(`   SOL received: ${solReceived.toFixed(6)}`);
       console.log(`   Signature: ${sellResult.signature}\n`);
 
-      // ✅ CALCULAR PnL CORRECTO CON FEES REALES
+      // ✅ CALCULAR PnL CORRECTO CON DATOS REALES
       const pnlData = PnLCalculator.calculatePnL({
         entryPrice: parseFloat(position.entryPrice),
         exitPrice: exitPrice,
         tokenAmount: tokensAmount,
         solSpent: parseFloat(position.solAmount),
         executor: executor,
-        slippage: 0, // En producción, calcular del resultado real
+        slippage: 0, // Ya está incluido en solReceived
         networkFee: 0.000005,
         priorityFee: Number(process.env.PRIORITY_FEE || '0.0005'),
       });
 
-      // Verificar discrepancias (útil para debug)
-      PnLCalculator.checkDiscrepancy({
+      // ✅ VALIDACIÓN DE COHERENCIA (NUEVA)
+      // Corregido: Llamada directa a la función sin 'this'
+      const coherenceCheck = validatePnLCoherence({
         entryPrice: parseFloat(position.entryPrice),
         exitPrice: exitPrice,
-        tokenAmount: tokensAmount,
         solSpent: parseFloat(position.solAmount),
-        executor: executor,
+        solReceived: solReceived,
+        tokenAmount: tokensAmount,
+        executor: executor
       });
+
+      if (!coherenceCheck.isValid) {
+        console.warn(`\n⚠️ ${coherenceCheck.warning}`);
+        console.warn(`   Entry: $${parseFloat(position.entryPrice).toFixed(10)}`);
+        console.warn(`   Exit: $${exitPrice.toFixed(10)}`);
+        console.warn(`   Spent: ${parseFloat(position.solAmount).toFixed(4)} SOL`);
+        console.warn(`   Received: ${solReceived.toFixed(4)} SOL`);
+        console.warn(`   Aborting position close for safety\n`);
+        return;
+      }
 
       // Cerrar posición con PnL correcto
       const closedPosition = await positionManager.closePosition(
         position.mint,
         exitPrice,
         tokensAmount,
-        pnlData.netReceived, // Usar el valor neto calculado
+        solReceived, // ✅ Usar valor real, no calculado
         reason,
         sellResult.signature,
       );
@@ -804,10 +828,10 @@ async function executeSell(position, currentPrice, _currentSolValue, reason) {
               `📊 Price Change: ${
                 pnlData.priceChangePercent >= 0 ? '+' : ''
               }${pnlData.priceChangePercent}%\n` +
-              `💸 Fees Impact: ${(
-                pnlData.pnlPercent - pnlData.priceChangePercent
-              ).toFixed(2)}%\n\n` +
-              `Net Received: ${pnlData.netReceived} SOL`,
+              `💸 Fee Impact: -${(
+                (0.0175 / 100) * parseFloat(position.solAmount)
+              ).toFixed(4)} SOL (1.75%)\n\n` +
+              `✅ Net Received: ${solReceived.toFixed(4)} SOL`,
             false,
           );
         } catch (e) {
@@ -820,6 +844,52 @@ async function executeSell(position, currentPrice, _currentSolValue, reason) {
   } catch (error) {
     console.error('❌ Error executing sell:', error.message);
   }
+}
+
+// ✅ FUNCIÓN NUEVA: Validar coherencia de PnL
+function validatePnLCoherence(trade) {
+  const {
+    entryPrice,
+    exitPrice,
+    solSpent,
+    solReceived,
+    tokenAmount,
+    executor
+  } = trade;
+
+  // Rango mínimo esperado: -90% (perder casi todo)
+  const minExpectedReceived = solSpent * 0.1;
+  
+  // Rango máximo esperado: +500% (ganancias extremas, pero posibles en pump.fun)
+  const maxExpectedReceived = solSpent * 6;
+
+  if (solReceived < minExpectedReceived) {
+    return {
+      isValid: false,
+      warning: `Received too low: ${solReceived.toFixed(4)} SOL < ${minExpectedReceived.toFixed(4)} SOL`
+    };
+  }
+
+  if (solReceived > maxExpectedReceived) {
+    return {
+      isValid: false,
+      warning: `Received too high: ${solReceived.toFixed(4)} SOL > ${maxExpectedReceived.toFixed(4)} SOL (Possible API error)`
+    };
+  }
+
+  // Validar que el precio por token sea coherente
+  const pricePerToken = solReceived / tokenAmount;
+  const expectedPriceMin = exitPrice * 0.5;
+  const expectedPriceMax = exitPrice * 2;
+
+  if (pricePerToken < expectedPriceMin || pricePerToken > expectedPriceMax) {
+    return {
+      isValid: false,
+      warning: `Price per token inconsistent: ${pricePerToken.toFixed(10)} (expected ~${exitPrice.toFixed(10)})`
+    };
+  }
+
+  return { isValid: true };
 }
 
 // ✅ FIXED: Complete sendPnLUpdate function
