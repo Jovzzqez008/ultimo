@@ -1,4 +1,4 @@
-// jupiterPriceService.js - CORREGIDO: API V1 (api.jup.ag) + RETRIES
+// jupiterPriceService.js - CORREGIDO: Usa lite-api.jup.ag (FREE) + RETRIES
 import fetch from "node-fetch";
 import {
   Connection,
@@ -48,11 +48,13 @@ export class JupiterPriceService {
     this.priceCache = new Map();
     this.cacheMaxAge = 5000; // 5s
     
-    // ✅ URLs ACTUALIZADAS a la nueva API V1 estable
-    this.jupiterQuoteURL = "https://api.jup.ag/swap/v1/quote";
-    this.jupiterSwapURL = "https://api.jup.ag/swap/v1/swap";
+    // ✅ FIXED: Usar lite-api.jup.ag (FREE, sin API key)
+    this.jupiterQuoteURL = "https://lite-api.jup.ag/v1/quote";
+    this.jupiterSwapURL = "https://lite-api.jup.ag/v1/swap";
 
-    console.log("🪐 JupiterPriceService READY (API V1)");
+    console.log("🪐 JupiterPriceService READY (lite-api - FREE)");
+    console.log("   Quote API: https://lite-api.jup.ag/v1/quote");
+    console.log("   Swap API: https://lite-api.jup.ag/v1/swap");
   }
 
   // ------------------------------------------------------------------------
@@ -103,7 +105,7 @@ export class JupiterPriceService {
 
       const SOL = "So11111111111111111111111111111111111111112";
 
-      // Usamos la nueva URL y swapMode=ExactIn para asegurar compatibilidad
+      // ✅ FIXED: Usar lite-api.jup.ag
       const url = `${this.jupiterQuoteURL}?inputMint=${mint}&outputMint=${SOL}&amount=1000000&swapMode=ExactIn&slippageBps=50`;
 
       const data = await fetchWithRetry(url);
@@ -123,6 +125,9 @@ export class JupiterPriceService {
       // Log menos agresivo para errores de red comunes
       if (err.message.includes('ENOTFOUND') || err.message.includes('fetch failed')) {
         console.warn(`⚠️ Jupiter Connection Issue: ${err.message}`);
+      } else if (err.message.includes('401')) {
+        console.error(`❌ Jupiter API Error: ${err.message}`);
+        console.error(`   Note: Using lite-api.jup.ag (free tier)`);
       } else {
         console.error("❌ Jupiter getPrice failed:", err.message);
       }
@@ -143,7 +148,7 @@ export class JupiterPriceService {
   // ------------------------------------------------------------------------
   async swapToken(mint, tokenAmount, slippageBps = 500) {
     try {
-      console.log("\n🪐 JUPITER ULTRA SWAP V1");
+      console.log("\n🪐 JUPITER ULTRA SWAP (lite-api)");
       console.log(" Mint:", mint);
       console.log(" Tokens:", tokenAmount);
       console.log(` Slippage: ${slippageBps / 100}%`);
@@ -166,7 +171,6 @@ export class JupiterPriceService {
       );
 
       // Paso 2: Swap instructions (Retry incluido)
-      // ✅ API V1 usa 'quoteResponse' en lugar de 'quote'
       const swapData = await fetchWithRetry(this.jupiterSwapURL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
