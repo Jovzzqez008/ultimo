@@ -75,7 +75,7 @@ class PriceService {
         console.log(`🎓 ${cacheKey.slice(0, 8)}... marcado como graduado por bonding curve`);
       }
     } catch (err) {
-      console.warn(`⚠️ Pump.fun price failed for ${cacheKey}: ${err.message}`);
+      // Ignoramos errores de bonding curve para no ensuciar logs
     }
 
     // 2) Intentar Jupiter (graduado o no se pudo leer la curva)
@@ -159,64 +159,70 @@ class PriceService {
   async getPumpFunPrice(tokenMint) {
     const curveAddress = this.findBondingCurveAddress(tokenMint);
 
-    const accountInfo = await this.connection.getAccountInfo(curveAddress);
-    if (!accountInfo || !accountInfo.data) {
-      // No hay curva: probablemente graduado o token inválido
-      throw new Error('No bonding curve account found');
+    try {
+      const accountInfo = await this.connection.getAccountInfo(curveAddress);
+      
+      if (!accountInfo || !accountInfo.data) {
+        // ✅ Silencio: Devolvemos null en lugar de lanzar Error
+        return null;
+      }
+
+      const data = accountInfo.data;
+
+      // Opcional: verificar signature (primeros 8 bytes)
+      const expectedSig = Buffer.from([0x17, 0xb7, 0xf8, 0x37, 0x60, 0xd8, 0xac, 0x60]);
+      const actualSig = data.subarray(0, 8);
+      if (!actualSig.equals(expectedSig)) {
+        console.warn('⚠️ Bonding curve account signature mismatch (IDL discriminator)');
+      }
+
+      // Layout según el IDL
+      const virtualTokenReserves = data.readBigUInt64LE(0x08);
+      const virtualSolReserves = data.readBigUInt64LE(0x10);
+      const realTokenReserves = data.readBigUInt64LE(0x18);
+      const realSolReserves = data.readBigUInt64LE(0x20);
+      const tokenTotalSupply = data.readBigUInt64LE(0x28);
+      const complete = data.readUInt8(0x30) !== 0;
+
+      if (virtualTokenReserves <= 0n || virtualSolReserves <= 0n) {
+        throw new Error('Invalid bonding curve state (zero reserves)');
+      }
+
+      const virtualSol = Number(virtualSolReserves) / LAMPORTS_PER_SOL;
+      const virtualTokens = Number(virtualTokenReserves) / 10 ** PUMP_TOKEN_DECIMALS;
+
+      const price = virtualSol / virtualTokens;
+
+      // Progreso de bonding
+      const INITIAL_REAL_TOKEN_RESERVES = 793100000000000n;
+      let bondingProgress = 0;
+      if (realTokenReserves < INITIAL_REAL_TOKEN_RESERVES) {
+        bondingProgress =
+          1 -
+          Number((realTokenReserves * 10000n) / INITIAL_REAL_TOKEN_RESERVES) /
+            10000;
+      }
+
+      console.log(`🎵 Pump.fun price for ${tokenMint.toBase58().slice(0, 8)}...: ${price.toFixed(10)} SOL`);
+      console.log(`  complete: ${complete}, bondingProgress: ${(bondingProgress * 100).toFixed(2)}%`);
+
+      return {
+        price,
+        curveState: {
+          virtualTokenReserves: virtualTokenReserves.toString(),
+          virtualSolReserves: virtualSolReserves.toString(),
+          realTokenReserves: realTokenReserves.toString(),
+          realSolReserves: realSolReserves.toString(),
+          tokenTotalSupply: tokenTotalSupply.toString(),
+          complete,
+        },
+        bondingProgress,
+        graduated: complete,
+      };
+    } catch (e) {
+      // Cualquier otro error de red o parseo devuelve null suavemente
+      return null;
     }
-
-    const data = accountInfo.data;
-
-    // Opcional: verificar signature (primeros 8 bytes)
-    const expectedSig = Buffer.from([0x17, 0xb7, 0xf8, 0x37, 0x60, 0xd8, 0xac, 0x60]);
-    const actualSig = data.subarray(0, 8);
-    if (!actualSig.equals(expectedSig)) {
-      console.warn('⚠️ Bonding curve account signature mismatch (IDL discriminator)');
-    }
-
-    // Layout según el IDL
-    const virtualTokenReserves = data.readBigUInt64LE(0x08);
-    const virtualSolReserves = data.readBigUInt64LE(0x10);
-    const realTokenReserves = data.readBigUInt64LE(0x18);
-    const realSolReserves = data.readBigUInt64LE(0x20);
-    const tokenTotalSupply = data.readBigUInt64LE(0x28);
-    const complete = data.readUInt8(0x30) !== 0;
-
-    if (virtualTokenReserves <= 0n || virtualSolReserves <= 0n) {
-      throw new Error('Invalid bonding curve state (zero reserves)');
-    }
-
-    const virtualSol = Number(virtualSolReserves) / LAMPORTS_PER_SOL;
-    const virtualTokens = Number(virtualTokenReserves) / 10 ** PUMP_TOKEN_DECIMALS;
-
-    const price = virtualSol / virtualTokens;
-
-    // Progreso de bonding
-    const INITIAL_REAL_TOKEN_RESERVES = 793100000000000n;
-    let bondingProgress = 0;
-    if (realTokenReserves < INITIAL_REAL_TOKEN_RESERVES) {
-      bondingProgress =
-        1 -
-        Number((realTokenReserves * 10000n) / INITIAL_REAL_TOKEN_RESERVES) /
-          10000;
-    }
-
-    console.log(`🎵 Pump.fun price for ${tokenMint.toBase58().slice(0, 8)}...: ${price.toFixed(10)} SOL`);
-    console.log(`  complete: ${complete}, bondingProgress: ${(bondingProgress * 100).toFixed(2)}%`);
-
-    return {
-      price,
-      curveState: {
-        virtualTokenReserves: virtualTokenReserves.toString(),
-        virtualSolReserves: virtualSolReserves.toString(),
-        realTokenReserves: realTokenReserves.toString(),
-        realSolReserves: realSolReserves.toString(),
-        tokenTotalSupply: tokenTotalSupply.toString(),
-        complete,
-      },
-      bondingProgress,
-      graduated: complete,
-    };
   }
 
   // ------------------------------------------------------------------
