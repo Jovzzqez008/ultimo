@@ -1,14 +1,14 @@
-// envCleaner.js - Ultra Clean & Validate Environment Variables (PumpPortal + Jupiter + Helius)
+// envCleaner.js - Ultra Clean & Validate Environment Variables
+// ✅ ACTUALIZADO: No necesita PUMPPORTAL_API_KEY para Local API
 
 import dotenv from 'dotenv';
 
 /**
- * ULTRA CLEANER – Actualizado para:
- *  - PumpPortal Lightning API
- *  - Jupiter SDK
+ * ULTRA CLEANER – Configurado para:
+ *  - PumpPortal Local API (0.5% fee, sin API key)
+ *  - Jupiter SDK (tokens graduados)
  *  - Pump.fun bonding curve reader
  *  - Copy trading hybrid strategy
- *  - All worker/server/runtime modules
  */
 export class EnvCleaner {
   constructor() {
@@ -102,18 +102,17 @@ export class EnvCleaner {
     console.log(`✅ RPC_URL: ${this.cleaned.RPC_URL}`);
 
     // ----------------------------------
-    // 🔥 PumpPortal Lightning API
+    // 🔥 PumpPortal Local API
+    // ✅ NO NECESITA API KEY
     // ----------------------------------
-    this.cleaned.PUMPPORTAL_API_KEY =
-      this.cleanString(process.env.PUMPPORTAL_API_KEY || '');
-
-    console.log(`⚡ PUMPPORTAL_API_KEY: ${this.cleaned.PUMPPORTAL_API_KEY ? 'OK' : 'missing'}`);
+    console.log(`⚡ PumpPortal: Using LOCAL API (0.5% fee)`);
+    console.log(`   ✅ No API key required - uses your own wallet`);
 
     // ----------------------------------
     // 🪐 Jupiter Service
     // ----------------------------------
     this.cleaned.JUPITER_SLIPPAGE_BPS = this.cleanNumber(
-      process.env.JUPITER_SLIPPAGE_BPS || '50'
+      process.env.JUPITER_SLIPPAGE_BPS || '500'
     );
     this.cleaned.JUPITER_TIMEOUT = this.cleanNumber(
       process.env.JUPITER_TIMEOUT || '5000'
@@ -154,10 +153,22 @@ export class EnvCleaner {
       process.env.MIN_WALLETS_TO_SELL || '1'
     );
 
+    // Slippage para PumpPortal (en porcentaje, ej: 10 = 10%)
+    this.cleaned.COPY_SLIPPAGE = this.cleanNumber(
+      process.env.COPY_SLIPPAGE || '10'
+    );
+
+    // Priority fee para PumpPortal (en SOL, ej: 0.0005 = 0.0005 SOL)
+    this.cleaned.PRIORITY_FEE = this.cleanNumber(
+      process.env.PRIORITY_FEE || '0.0005'
+    );
+
     console.log(`📈 POSITION_SIZE_SOL: ${this.cleaned.POSITION_SIZE_SOL}`);
     console.log(`📉 COPY_STOP_LOSS: -${this.cleaned.COPY_STOP_LOSS}%`);
     console.log(`📈 TAKE PROFIT: +${this.cleaned.COPY_PROFIT_TARGET}%`);
     console.log(`📉 TRAILING STOP: -${this.cleaned.TRAILING_STOP}%`);
+    console.log(`⚡ COPY SLIPPAGE: ${this.cleaned.COPY_SLIPPAGE}%`);
+    console.log(`💎 PRIORITY FEE: ${this.cleaned.PRIORITY_FEE} SOL`);
 
     // ----------------------------------
     // 📊 TELEGRAM
@@ -187,7 +198,7 @@ export class EnvCleaner {
     // ----------------------------------
     this.cleaned.PUMP_PROGRAM_ID = this.cleanString(
       process.env.PUMP_PROGRAM_ID ||
-      '6EF8rrecthR5Dkp1KPcLW7jkZo4U9AWhjbnESmtDDMTP'
+      '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'
     );
 
     console.log(`🎵 Pump.fun ProgramID: ${this.cleaned.PUMP_PROGRAM_ID}`);
@@ -200,6 +211,8 @@ export class EnvCleaner {
     }
 
     console.log('\n✅ Environment clean & validated');
+    console.log('🔷 PumpPortal: Local API mode (0.5% fee)');
+    console.log('🪐 Jupiter: Ready for graduated tokens\n');
     return true;
   }
 
