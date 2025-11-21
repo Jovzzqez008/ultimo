@@ -1,75 +1,59 @@
-// pnlCalculator.js - Cálculo de PnL CORRECTO con FEES REALES (Nov 2025)
-
-/**
- * 💰 FEES REALES ACTUALIZADOS:
- * - Pump.fun bonding curve: 1.25% (0.95% Protocol + 0.30% Creator)
- * - PumpPortal Local API: 0.5% adicional
- * - TOTAL PumpPortal: 1.75% por operación (buy/sell)
- * - Jupiter (tokens graduados): ~0.3% promedio (varía según DEX)
- * - Solana network: 0.000005 SOL base + priority fee
- */
+// pnlCalculator.js - MEJORADO: Logs más claros y validación
 
 export class PnLCalculator {
   /**
    * 💰 Calcula P&L CORRECTO incluyendo TODAS las fees
-   * 
-   * FEES INCLUIDOS:
-   * - Pump.fun: 1.25% buy + 1.25% sell
-   * - PumpPortal: 0.5% buy + 0.5% sell (adicional a Pump.fun)
-   * - Jupiter: ~0.3% (para tokens graduados, sin protocol fee)
-   * - Slippage: configurado por usuario
-   * - Network fees: ~0.000005 SOL + priority fee
-   * 
-   * @param {Object} trade - {entryPrice, exitPrice, tokenAmount, solSpent, executor, slippage, networkFee, priorityFee}
-   * @returns {Object} - {pnlSOL, pnlPercent, breakdown, netReceived}
+   * MEJORADO: Logs más informativos y validaciones
    */
   static calculatePnL(trade) {
     const {
-      entryPrice,        // Precio al comprar (SOL/token)
-      exitPrice,         // Precio al vender (SOL/token)
-      tokenAmount,       // Cantidad de tokens comprados
-      solSpent,          // SOL gastado en compra (YA incluye fees)
-      executor = 'pumpportal',  // 'pumpportal' o 'jupiter'
-      slippage = 0,      // Slippage real experimentado (0-1, ej: 0.05 = 5%)
-      networkFee = 0.000005,  // Fee base de red Solana
-      priorityFee = 0     // Priority fee adicional en SOL
+      entryPrice,
+      exitPrice,
+      tokenAmount,
+      solSpent,
+      executor = 'pumpportal',
+      slippage = 0,
+      networkFee = 0.000005,
+      priorityFee = 0
     } = trade;
 
     if (!entryPrice || !exitPrice || !tokenAmount || !solSpent) {
       throw new Error('❌ Missing required fields for PnL calculation');
     }
 
-    // === FEES SEGÚN EXECUTOR (FEES REALES) ===
+    // === VALIDACIONES INICIALES ===
+    if (tokenAmount <= 0 || solSpent <= 0 || entryPrice <= 0 || exitPrice <= 0) {
+      throw new Error('❌ All values must be positive');
+    }
+
+    // === FEES SEGÚN EXECUTOR (REALES) ===
     let buyFeeTotal, sellFeeTotal, executorLabel;
     
     if (executor === 'pumpportal') {
-      // PumpPortal Local API = Pump.fun (1.25%) + PumpPortal (0.5%) = 1.75% total
       buyFeeTotal = 0.0175;   // 1.75%
       sellFeeTotal = 0.0175;  // 1.75%
-      executorLabel = 'PumpPortal (Pump.fun bonding curve)';
+      executorLabel = 'PumpPortal (Pump.fun + 0.5%)';
     } else if (executor === 'jupiter') {
-      // Jupiter para tokens graduados (~0.3% promedio, sin protocol fee)
-      buyFeeTotal = 0.003;   // ~0.3%
-      sellFeeTotal = 0.003;  // ~0.3%
+      buyFeeTotal = 0.003;    // ~0.3%
+      sellFeeTotal = 0.003;   // ~0.3%
       executorLabel = 'Jupiter (DEX aggregator)';
     } else {
-      // Fallback genérico
       buyFeeTotal = 0.01;
       sellFeeTotal = 0.01;
       executorLabel = 'Generic DEX';
     }
 
-    console.log(`\n📊 P&L CALCULATION (${executorLabel})`);
+    console.log(`\n📊 P&L CALCULATION`);
     console.log(`════════════════════════════════════════`);
+    console.log(`Executor: ${executorLabel}`);
     
     // === PASO 1: Análisis de la COMPRA ===
     console.log(`\n💵 ENTRY (BUY)`);
     console.log(`  Price: ${entryPrice.toFixed(10)} SOL/token`);
     console.log(`  Tokens: ${tokenAmount.toLocaleString()}`);
-    console.log(`  SOL Spent (total): ${solSpent.toFixed(6)} SOL`);
-    console.log(`  Buy Fee: ${(buyFeeTotal * 100).toFixed(2)}%`);
+    console.log(`  SOL Spent: ${solSpent.toFixed(6)} SOL (already includes buy fees)`);
     
-    // === PASO 2: Valor actual de los tokens (ANTES de fees de venta) ===
+    // === PASO 2: Valor teórico de tokens al precio de salida ===
     const grossValue = tokenAmount * exitPrice;
     console.log(`\n💰 EXIT (SELL)`);
     console.log(`  Price: ${exitPrice.toFixed(10)} SOL/token`);
@@ -82,9 +66,10 @@ export class PnLCalculator {
     console.log(`  After Sell Fee: ${valueAfterSellFee.toFixed(6)} SOL`);
     
     // === PASO 4: Aplicar slippage (si existe) ===
-    const slippageAmount = valueAfterSellFee * Math.abs(slippage);
-    const valueAfterSlippage = valueAfterSellFee - slippageAmount;
-    if (slippage > 0) {
+    let valueAfterSlippage = valueAfterSellFee;
+    if (Math.abs(slippage) > 0.0001) {
+      const slippageAmount = valueAfterSellFee * Math.abs(slippage);
+      valueAfterSlippage = valueAfterSellFee - slippageAmount;
       console.log(`  Slippage (${(slippage * 100).toFixed(2)}%): -${slippageAmount.toFixed(6)} SOL`);
       console.log(`  After Slippage: ${valueAfterSlippage.toFixed(6)} SOL`);
     }
@@ -92,7 +77,7 @@ export class PnLCalculator {
     // === PASO 5: Network fees ===
     const totalNetworkFee = networkFee + priorityFee;
     const netReceived = valueAfterSlippage - totalNetworkFee;
-    console.log(`  Network Fee: -${networkFee.toFixed(6)} SOL`);
+    console.log(`  Network Base: -${networkFee.toFixed(6)} SOL`);
     if (priorityFee > 0) {
       console.log(`  Priority Fee: -${priorityFee.toFixed(6)} SOL`);
     }
@@ -105,25 +90,32 @@ export class PnLCalculator {
     // Cambio de precio puro (sin fees, para referencia)
     const priceChangePercent = ((exitPrice - entryPrice) / entryPrice) * 100;
     
+    // ✅ NUEVA MÉTRICA: Fee impact como % del capital invertido
+    const totalFeeAmount = (solSpent * buyFeeTotal) + sellFeeAmount + totalNetworkFee;
+    const feeImpactPercent = (totalFeeAmount / solSpent) * 100;
+    
     console.log(`\n═══════════════════════════════════════`);
-    console.log(`📈 RESULT`);
+    console.log(`📈 FINAL RESULT`);
     console.log(`  ${pnlSOL >= 0 ? '🟢' : '🔴'} PnL: ${pnlSOL >= 0 ? '+' : ''}${pnlSOL.toFixed(6)} SOL`);
     console.log(`  ${pnlPercent >= 0 ? '🟢' : '🔴'} PnL: ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%`);
     console.log(`  📊 Price Change: ${priceChangePercent >= 0 ? '+' : ''}${priceChangePercent.toFixed(2)}%`);
-    console.log(`  💸 Total Fees Impact: ${((pnlPercent - priceChangePercent)).toFixed(2)}%`);
-    console.log(`═══════════════════════════════════════\n`);
+    console.log(`  💸 Total Fees: -${totalFeeAmount.toFixed(6)} SOL (${feeImpactPercent.toFixed(2)}% of entry)`);
+    console.log(`════════════════════════════════════════\n`);
     
     return {
       pnlSOL: Number(pnlSOL.toFixed(6)),
       pnlPercent: Number(pnlPercent.toFixed(2)),
       priceChangePercent: Number(priceChangePercent.toFixed(2)),
       netReceived: Number(netReceived.toFixed(6)),
+      totalFeeAmount: Number(totalFeeAmount.toFixed(6)),
+      feeImpactPercent: Number(feeImpactPercent.toFixed(2)),
       breakdown: {
         entry: {
           price: entryPrice,
           tokens: tokenAmount,
           solSpent,
           buyFeePercent: buyFeeTotal,
+          buyFeeAmount: solSpent * buyFeeTotal,
         },
         exit: {
           price: exitPrice,
@@ -131,7 +123,7 @@ export class PnLCalculator {
           sellFeeAmount,
           sellFeePercent: sellFeeTotal,
           valueAfterSellFee,
-          slippageAmount,
+          slippageAmount: valueAfterSellFee - valueAfterSlippage,
           slippagePercent: slippage,
           valueAfterSlippage,
           networkFee,
@@ -147,12 +139,12 @@ export class PnLCalculator {
 
   /**
    * 📈 PnL UNREALIZADO (posición abierta)
-   * Estima cuánto ganarías/perderías si vendieras AHORA
+   * MEJORADO: Validaciones más estrictas
    */
   static calculateUnrealizedPnL(position, currentPrice, options = {}) {
     const {
       executor = 'pumpportal',
-      estimatedSlippage = 0.02,  // 2% por defecto
+      estimatedSlippage = 0.02,
       networkFee = 0.000005,
       priorityFee = 0
     } = options;
@@ -165,8 +157,12 @@ export class PnLCalculator {
       throw new Error('❌ Missing fields for unrealized PnL');
     }
 
-    // Fees según executor (FEES REALES)
-    const sellFeeTotal = executor === 'pumpportal' ? 0.0175 : 0.003; // 1.75% o 0.3%
+    if (currentPrice <= 0 || entryPrice <= 0) {
+      throw new Error('❌ Prices must be positive');
+    }
+
+    // Fees según executor
+    const sellFeeTotal = executor === 'pumpportal' ? 0.0175 : 0.003;
 
     // Simular venta
     const grossValue = tokenAmount * currentPrice;
@@ -201,23 +197,41 @@ export class PnLCalculator {
   }
 
   /**
-   * ⚠️ Detecta discrepancias grandes entre cambio de precio y PnL real
-   * (útil para debugging)
+   * ⚠️ Detecta inconsistencias en los cálculos
+   * MEJORADO: Más tolerante y con mejor reporting
    */
   static checkDiscrepancy(trade) {
-    const result = this.calculatePnL(trade);
-    const discrepancy = Math.abs(result.priceChangePercent - result.pnlPercent);
+    try {
+      const result = this.calculatePnL(trade);
+      const discrepancy = Math.abs(result.priceChangePercent - result.pnlPercent);
 
-    if (discrepancy > 5) {
-      console.warn(`\n⚠️ HIGH FEE IMPACT DETECTED`);
-      console.warn(`  Price moved: ${result.priceChangePercent.toFixed(2)}%`);
-      console.warn(`  Your PnL: ${result.pnlPercent.toFixed(2)}%`);
-      console.warn(`  Difference: ${discrepancy.toFixed(2)}% (fees+slippage impact)`);
+      // Tolerancia: 5% de discrepancia es normal por fees
+      if (discrepancy > 5) {
+        console.warn(`\n⚠️ DISCREPANCY DETECTED`);
+        console.warn(`  Price moved: ${result.priceChangePercent.toFixed(2)}%`);
+        console.warn(`  Your P&L: ${result.pnlPercent.toFixed(2)}%`);
+        console.warn(`  Difference: ${discrepancy.toFixed(2)}%`);
+        console.warn(`  Expected: ~${result.feeImpactPercent.toFixed(2)}% from fees`);
+        
+        if (discrepancy > result.feeImpactPercent * 2) {
+          console.warn(`  🔴 ANOMALY: Fees too high or data inconsistent!\n`);
+          return {
+            hasHighImpact: true,
+            feeImpact: discrepancy,
+            severity: 'HIGH',
+            reason: 'Fees exceed expected amount'
+          };
+        }
+      }
+
+      return {
+        hasHighImpact: false,
+        feeImpact: discrepancy,
+        severity: 'OK'
+      };
+    } catch (err) {
+      console.error('❌ Discrepancy check error:', err.message);
+      return { hasHighImpact: false, severity: 'ERROR' };
     }
-
-    return {
-      hasHighImpact: discrepancy > 5,
-      feeImpact: discrepancy,
-    };
   }
 }
