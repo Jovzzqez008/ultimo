@@ -1,4 +1,5 @@
-// copyMonitor.js - HYBRID SMART COPY TRADING with PumpPortal + Jupiter
+// copyMonitor.js - HYBRID SMART COPY TRADING
+// ✅ PumpPortal Local API (0.5% fee) + Jupiter (graduated tokens)
 
 import { GraduationHandler } from './graduationHandler.js';
 const graduationHandler = new GraduationHandler();
@@ -36,13 +37,14 @@ if (ENABLE_TRADING) {
   try {
     const { PositionManager } = await import('./riskManager.js');
 
+    // ✅ Inicializar PumpPortal con Local API (no necesita API key)
     pumpPortal = new PumpPortalExecutor({
-      PUMPPORTAL_API_KEY: process.env.PUMPPORTAL_API_KEY,
       RPC_URL: process.env.RPC_URL,
       PRIVATE_KEY: process.env.PRIVATE_KEY,
       DRY_RUN: process.env.DRY_RUN,
     });
 
+    // ✅ Inicializar Jupiter para tokens graduados
     jupiterService = new JupiterPriceService({
       RPC_URL: process.env.RPC_URL,
       PRIVATE_KEY: process.env.PRIVATE_KEY,
@@ -51,7 +53,8 @@ if (ENABLE_TRADING) {
     positionManager = new PositionManager(redis);
 
     console.log(`💼 Smart Copy Trading ${DRY_RUN ? '📄 PAPER' : '💰 LIVE'} enabled`);
-    console.log(`   Executor: PumpPortal (Pump.fun) + Jupiter (graduated)`);
+    console.log(`   Pump.fun: PumpPortal Local API (0.5% fee)`);
+    console.log(`   Graduated: Jupiter Ultra Swap`);
     console.log(`   Position Size (ENV): ${process.env.POSITION_SIZE_SOL || '0.1'} SOL`);
     console.log(`   🎯 HYBRID exit strategy active\n`);
   } catch (error) {
@@ -269,7 +272,7 @@ async function processCopySignals() {
 
         if (buyResult.success) {
           const mode = DRY_RUN ? '📄 PAPER' : '💰 LIVE';
-          const executedDex = 'Pump.fun (PumpPortal)';
+          const executedDex = 'Pump.fun (PumpPortal Local API - 0.5%)';
 
           console.log(`${mode} BUY EXECUTED via PumpPortal`);
           console.log(`   Tokens: ${buyResult.tokensReceived}`);
@@ -511,16 +514,16 @@ async function executeSell(position, currentPrice, _currentSolValue, reason) {
     let executorLabel;
 
     if (!isGraduated) {
-      // VENTA EN PUMP.FUN via PumpPortal
+      // ✅ VENTA EN PUMP.FUN via PumpPortal Local API
       sellResult = await pumpPortal.sellToken(
         position.mint,
         tokensAmount,
         Number(process.env.COPY_SLIPPAGE || '10'),
         Number(process.env.PRIORITY_FEE || '0.0005'),
       );
-      executorLabel = 'Pump.fun (PumpPortal)';
+      executorLabel = 'Pump.fun (PumpPortal Local API - 0.5%)';
     } else {
-      // VENTA EN JUPITER (TOKEN GRADUADO)
+      // ✅ VENTA EN JUPITER (TOKEN GRADUADO)
       sellResult = await jupiterService.swapToken(
         position.mint,
         tokensAmount,
@@ -660,7 +663,8 @@ setInterval(async () => {
 
 console.log('🚀 Copy Monitor HYBRID strategy started');
 console.log(`   Mode: ${DRY_RUN ? '📄 PAPER TRADING' : '💰 LIVE TRADING'}`);
-console.log(`   Executor: PumpPortal + Jupiter (graduated)`);
+console.log(`   Pump.fun: PumpPortal Local API (0.5% fee)`);
+console.log(`   Graduated: Jupiter Ultra Swap`);
 console.log(`   🎯 HYBRID exit: Phase 1-3 with trailing stop\n`);
 
 Promise.all([
