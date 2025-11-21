@@ -1,19 +1,29 @@
-// jupiterPriceService.js - Precio + Graduación + Swap Ultra para tokens graduados
-// TOTALMENTE COMPATIBLE con tu arquitectura actual
-// - priceService.js lo usará para precios cuando un token no está en Pump.fun
-// - multiDexExecutor.js lo usará para VENDER tokens graduados
-// - riskManager.js recibirá solReceived para PnL preciso
-
+// jupiterPriceService.js - CORREGIDO: API V1 (api.jup.ag) + RETRIES
 import fetch from "node-fetch";
 import {
   Connection,
-  PublicKey,
-  Transaction,
   VersionedTransaction,
   Keypair,
   SendTransactionError
 } from "@solana/web3.js";
 import bs58 from "bs58";
+
+// Helper para reintentos automáticos
+async function fetchWithRetry(url, options = {}, retries = 3, delay = 1000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch(url, options);
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`HTTP ${res.status}: ${text}`);
+      }
+      return await res.json();
+    } catch (err) {
+      if (i === retries - 1) throw err;
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+}
 
 export class JupiterPriceService {
   constructor(config) {
@@ -37,10 +47,12 @@ export class JupiterPriceService {
     // Cache
     this.priceCache = new Map();
     this.cacheMaxAge = 5000; // 5s
-    this.jupiterQuoteURL = "https://quote-api.jup.ag/v6/quote";
-    this.jupiterSwapURL = "https://quote-api.jup.ag/v6/swap-instructions";
+    
+    // ✅ URLs ACTUALIZADAS a la nueva API V1 estable
+    this.jupiterQuoteURL = "https://api.jup.ag/swap/v1/quote";
+    this.jupiterSwapURL = "https://api.jup.ag/swap/v1/swap";
 
-    console.log("🪐 JupiterPriceService READY");
+    console.log("🪐 JupiterPriceService READY (API V1)");
   }
 
   // ------------------------------------------------------------------------
@@ -91,12 +103,10 @@ export class JupiterPriceService {
 
       const SOL = "So11111111111111111111111111111111111111112";
 
-      const url = `${this.jupiterQuoteURL}?inputMint=${mint}&outputMint=${SOL}&amount=1000000`;
+      // Usamos la nueva URL y swapMode=ExactIn para asegurar compatibilidad
+      const url = `${this.jupiterQuoteURL}?inputMint=${mint}&outputMint=${SOL}&amount=1000000&swapMode=ExactIn&slippageBps=50`;
 
-      const res = await fetch(url, { timeout: 5000 });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-      const data = await res.json();
+      const data = await fetchWithRetry(url);
 
       if (!data.outAmount) throw new Error("Quote has no outAmount");
 
@@ -110,7 +120,12 @@ export class JupiterPriceService {
 
       return { price, source: "jupiter" };
     } catch (err) {
-      console.error("❌ Jupiter getPrice failed:", err.message);
+      // Log menos agresivo para errores de red comunes
+      if (err.message.includes('ENOTFOUND') || err.message.includes('fetch failed')) {
+        console.warn(`⚠️ Jupiter Connection Issue: ${err.message}`);
+      } else {
+        console.error("❌ Jupiter getPrice failed:", err.message);
+      }
 
       if (this.priceCache.has(mint)) {
         return {
@@ -128,42 +143,39 @@ export class JupiterPriceService {
   // ------------------------------------------------------------------------
   async swapToken(mint, tokenAmount, slippageBps = 500) {
     try {
-      console.log("\n🪐 JUPITER ULTRA SWAP");
+      console.log("\n🪐 JUPITER ULTRA SWAP V1");
       console.log(" Mint:", mint);
       console.log(" Tokens:", tokenAmount);
       console.log(` Slippage: ${slippageBps / 100}%`);
 
       const inputMint = mint;
-      const outputMint =
-        "So11111111111111111111111111111111111111112"; // SOL
-      const amount = tokenAmount;
+      const outputMint = "So11111111111111111111111111111111111111112"; // SOL
+      const amount = Math.floor(tokenAmount);
 
-      // Paso 1: obtener quote
-      const quoteURL = `${this.jupiterQuoteURL}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippageBps}&onlyDirectRoutes=false`;
+      // Paso 1: obtener quote (Retry incluido)
+      const quoteURL = `${this.jupiterQuoteURL}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippageBps}`;
 
-      const quoteRes = await fetch(quoteURL, { timeout: 5000 });
-      const quote = await quoteRes.json();
+      const quoteResponse = await fetchWithRetry(quoteURL);
 
-      if (!quote.outAmount) {
+      if (!quoteResponse.outAmount) {
         throw new Error("Jupiter quote failed");
       }
 
       console.log(
-        ` Expected SOL: ${(Number(quote.outAmount) / 1e9).toFixed(4)} SOL`
+        ` Expected SOL: ${(Number(quoteResponse.outAmount) / 1e9).toFixed(4)} SOL`
       );
 
-      // Paso 2: Swap instructions
-      const swapRes = await fetch(this.jupiterSwapURL, {
+      // Paso 2: Swap instructions (Retry incluido)
+      // ✅ API V1 usa 'quoteResponse' en lugar de 'quote'
+      const swapData = await fetchWithRetry(this.jupiterSwapURL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          quote: quote,
+          quoteResponse: quoteResponse,
           userPublicKey: this.wallet.publicKey.toString(),
           wrapAndUnwrapSol: true
         })
       });
-
-      const swapData = await swapRes.json();
 
       if (!swapData.swapTransaction) {
         throw new Error("Jupiter swap API returned no transaction");
@@ -195,9 +207,9 @@ export class JupiterPriceService {
         success: true,
         action: "sell",
         signature,
-        solReceived: Number(quote.outAmount) / 1e9,
-        expectedSOL: Number(quote.outAmount) / 1e9,
-        priceImpact: quote.priceImpact,
+        solReceived: Number(quoteResponse.outAmount) / 1e9,
+        expectedSOL: Number(quoteResponse.outAmount) / 1e9,
+        priceImpact: quoteResponse.priceImpact,
         tokenAmount
       };
     } catch (err) {
