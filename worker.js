@@ -30,8 +30,8 @@ async function startWorker() {
   }
 
   try {
-    // Verificar configuración necesaria
-    const requiredVars = ['RPC_URL', 'PRIVATE_KEY', 'PUMPPORTAL_API_KEY'];
+    // ✅ CORREGIDO: No necesita PUMPPORTAL_API_KEY para Local API
+    const requiredVars = ['RPC_URL', 'PRIVATE_KEY'];
     const missingVars = requiredVars.filter((v) => !process.env[v]);
 
     if (missingVars.length > 0) {
@@ -44,10 +44,10 @@ async function startWorker() {
     const autoTrading = process.env.ENABLE_AUTO_TRADING === 'true';
 
     const maxPositions = process.env.MAX_POSITIONS || '2';
-    const positionSize = process.env.POSITION_SIZE_SOL || '0.025';
-    const priorityFeeSol = process.env.PRIORITY_FEE || '0.0005'; // En SOL, usado por PumpPortalExecutor
+    const positionSize = process.env.POSITION_SIZE_SOL || '0.05';
+    const priorityFeeSol = process.env.PRIORITY_FEE || '0.0005';
     const profitTarget = process.env.COPY_PROFIT_TARGET || '200';
-    const trailingStop = process.env.TRAILING_STOP || '15';
+    const trailingStop = process.env.TRAILING_STOP || '25';
     const stopLoss = process.env.COPY_STOP_LOSS || '15';
     const jupiterSlippageBps = process.env.JUPITER_SLIPPAGE_BPS || '500';
     const copySlippage = process.env.COPY_SLIPPAGE || '10';
@@ -59,7 +59,7 @@ async function startWorker() {
     console.log(`   Auto Trading: ${autoTrading ? 'Enabled' : 'Disabled'}`);
     console.log(`   Max Positions: ${maxPositions}`);
     console.log(`   Position Size: ${positionSize} SOL`);
-    console.log(`   Priority Fee (PumpPortal): ${priorityFeeSol} SOL`);
+    console.log(`   Priority Fee: ${priorityFeeSol} SOL`);
     console.log(
       `   Profit Target: +${profitTarget}% | Trailing Stop: -${trailingStop}% | Stop Loss: -${stopLoss}%`
     );
@@ -68,7 +68,8 @@ async function startWorker() {
         Number(jupiterSlippageBps) / 100
       ).toFixed(2)}%)`
     );
-    console.log(`   Copy Slippage (PumpPortal): ${copySlippage}%\n`);
+    console.log(`   PumpPortal Slippage: ${copySlippage}%`);
+    console.log(`   🔷 PumpPortal: Local API (0.5% fee - No API key needed)\n`);
 
     if (!autoTrading) {
       console.log('⚠️ Auto trading is DISABLED');
