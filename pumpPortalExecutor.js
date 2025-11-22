@@ -1,5 +1,8 @@
-// pumpPortalExecutor.js – PumpPortal LOCAL Transaction API (0.5% fee)
-// Compatible con CUALQUIER private key en base58
+// pumpPortalExecutor.js - PumpPortal LOCAL Transaction API (0.5% fee)
+// ✅ Compatible con CUALQUIER private key en base58
+// ✅ Usa Local API (trade-local) para BUY/SELL
+// ✅ Validación fuerte de TX: nunca devuelve success=true si on-chain falló
+// ✅ Protege contra PnL falsos (tokens / SOL no se movieron)
 
 import axios from 'axios';
 import bs58 from 'bs58';
@@ -10,27 +13,34 @@ import {
 } from '@solana/web3.js';
 
 export class PumpPortalExecutor {
-  constructor(config) {
+  constructor(config = {}) {
     this.rpcUrl = config.RPC_URL;
     this.dryRun = config.DRY_RUN !== 'false';
 
-    // ✅ USA TU PROPIA PRIVATE KEY (no necesitas la de PumpPortal)
+    if (!this.rpcUrl) {
+      throw new Error('PumpPortalExecutor: Missing RPC_URL');
+    }
+    if (!config.PRIVATE_KEY) {
+      throw new Error('PumpPortalExecutor: Missing PRIVATE_KEY');
+    }
+
     const secretKey = bs58.decode(config.PRIVATE_KEY);
     this.wallet = Keypair.fromSecretKey(secretKey);
 
     this.connection = new Connection(this.rpcUrl, {
       commitment: 'confirmed',
-      skipPreflight: false,
-      maxRetries: 3,
     });
 
-    // ✅ Local API endpoint (NO necesita API key)
+    // Local API (NO necesita API key, fee fija 0.5%)
     this.baseUrl = 'https://pumpportal.fun/api/trade-local';
 
-    console.log('🔷 PumpPortal Executor (LOCAL API - 0.5% fee)');
-    console.log(`   Wallet: ${this.wallet.publicKey.toString()}`);
-    console.log(`   Mode: ${this.dryRun ? '📄 PAPER' : '💰 LIVE'}`);
-    console.log('   ✅ Using your own private key');
+    console.log('✅ PumpPortalExecutor initialized (LOCAL API)');
+    console.log(`   RPC: ${this.rpcUrl}`);
+    console.log(
+      `   Wallet: ${this.wallet.publicKey.toBase58().slice(0, 8)}... (dryRun=${
+        this.dryRun
+      })`,
+    );
   }
 
   // ------------------------------------------------------------------------
@@ -48,13 +58,12 @@ export class PumpPortalExecutor {
         return this.simulateBuy(mint, solAmount);
       }
 
-      // ✅ Payload para Local API (NO incluye API key)
       const payload = {
-        publicKey: this.wallet.publicKey.toBase58(), // Tu wallet pública
+        publicKey: this.wallet.publicKey.toBase58(),
         action: 'buy',
         mint,
         amount: solAmount,
-        denominatedInSol: 'true', // cantidad en SOL
+        denominatedInSol: 'true',
         slippage,
         priorityFee,
         pool: 'pump',
@@ -64,7 +73,7 @@ export class PumpPortalExecutor {
 
       const response = await axios.post(this.baseUrl, payload, {
         timeout: 30000,
-        responseType: 'arraybuffer', // Importante: recibir como buffer
+        responseType: 'arraybuffer',
         headers: {
           'Content-Type': 'application/json',
         },
@@ -78,18 +87,14 @@ export class PumpPortalExecutor {
 
       console.log('   ✅ Unsigned transaction received');
 
-      // ✅ Deserializar la transacción
       const txBuffer = new Uint8Array(response.data);
       const tx = VersionedTransaction.deserialize(txBuffer);
 
       console.log('   🔐 Signing with your private key...');
-
-      // ✅ Firmar con TU private key
       tx.sign([this.wallet]);
 
       console.log('   📡 Sending to RPC...');
 
-      // ✅ Enviar con TU RPC
       const signature = await this.connection.sendTransaction(tx, {
         skipPreflight: false,
         maxRetries: 3,
@@ -98,11 +103,23 @@ export class PumpPortalExecutor {
       console.log(`   ✅ Transaction sent: ${signature.slice(0, 20)}...`);
       console.log(`   🔗 https://solscan.io/tx/${signature}`);
 
-      // Esperar confirmación
+      // ⏳ Esperar confirmación con verificación de err
       await this.waitForConfirmation(signature);
 
-      // Obtener detalles de la transacción
+      // 📦 Obtener detalles on-chain y validar que realmente hubo BUY
       const txDetails = await this.getTxDetails(signature);
+
+      if (!txDetails || txDetails.failed) {
+        const reason = txDetails?.error || 'unknown on-chain error';
+        throw new Error(`On-chain BUY failed: ${reason}`);
+      }
+
+      const tokensReceived = txDetails.tokensReceived ?? 0;
+      if (!tokensReceived || tokensReceived <= 0) {
+        throw new Error(
+          `On-chain BUY has zero tokensReceived (=${tokensReceived}). Treating as failed.`,
+        );
+      }
 
       return {
         success: true,
@@ -110,9 +127,9 @@ export class PumpPortalExecutor {
         mint,
         signature,
         solSpent: solAmount,
-        tokensReceived: txDetails?.tokensReceived || 0,
+        tokensReceived,
         timestamp: Date.now(),
-        fee: '0.5%', // Local API fee
+        fee: '0.5%',
         api: 'local',
       };
     } catch (err) {
@@ -135,34 +152,30 @@ export class PumpPortalExecutor {
       console.log(`   Mint: ${mint.slice(0, 12)}...`);
       console.log(`   Requested amount (debug): ${amountTokens} tokens`);
       console.log(`   Slippage: ${slippage}%`);
+      console.log(`   Priority: ${priorityFee} SOL`);
 
       if (this.dryRun) {
         return this.simulateSell(mint, amountTokens);
       }
 
-      // 🔥 IMPORTANTE:
-      // Siempre vendemos el 100% de los tokens en la wallet usando la sintaxis "100%"
-      // de PumpPortal. Esto evita problemas con decimales y balances desincronizados.
+      // Siempre vendemos el 100% de los tokens usando "100%" para evitar desajustes.
       const sellAmountField =
         typeof amountTokens === 'string' && amountTokens.trim().endsWith('%')
           ? amountTokens
           : '100%';
 
-      console.log(`   🧮 Effective amount sent to API: ${sellAmountField} (sell all)`);
-
-      // ✅ Payload para Local API
       const payload = {
         publicKey: this.wallet.publicKey.toBase58(),
         action: 'sell',
         mint,
-        amount: sellAmountField, // "100%" → vende TODO
-        denominatedInSol: 'false', // tokens / porcentaje de tokens
+        amount: sellAmountField,
+        denominatedInSol: 'false',
         slippage,
         priorityFee,
         pool: 'pump',
       };
 
-      console.log('   📤 Requesting unsigned transaction...');
+      console.log('   📤 Requesting unsigned transaction (SELL)...');
 
       const response = await axios.post(this.baseUrl, payload, {
         timeout: 30000,
@@ -187,6 +200,7 @@ export class PumpPortalExecutor {
       tx.sign([this.wallet]);
 
       console.log('   📡 Sending to RPC...');
+
       const signature = await this.connection.sendTransaction(tx, {
         skipPreflight: false,
         maxRetries: 3,
@@ -195,18 +209,40 @@ export class PumpPortalExecutor {
       console.log(`   ✅ Transaction sent: ${signature.slice(0, 20)}...`);
       console.log(`   🔗 https://solscan.io/tx/${signature}`);
 
+      // ⏳ Esperar confirmación con verificación de err
       await this.waitForConfirmation(signature);
+
+      // 📦 Obtener detalles on-chain y validar que realmente hubo SELL
       const txDetails = await this.getTxDetails(signature);
+
+      if (!txDetails || txDetails.failed) {
+        const reason = txDetails?.error || 'unknown on-chain error';
+        throw new Error(`On-chain SELL failed: ${reason}`);
+      }
+
+      const tokensSold =
+        txDetails.tokensSold ?? txDetails.tokensReceived ?? 0;
+      const solReceived = txDetails.solReceived ?? 0;
+
+      if (!tokensSold || tokensSold <= 0) {
+        throw new Error(
+          `On-chain SELL has zero tokensSold (=${tokensSold}). Treating as failed.`,
+        );
+      }
+      if (!solReceived || solReceived <= 0) {
+        throw new Error(
+          `On-chain SELL has zero solReceived (=${solReceived}). Treating as failed.`,
+        );
+      }
 
       return {
         success: true,
         action: 'sell',
         mint,
         signature,
-        // Informativo: lo pedido + lo que se detectó on-chain
         requestedTokens: amountTokens,
-        tokensSold: txDetails?.tokensSold ?? txDetails?.tokensReceived ?? 0,
-        solReceived: txDetails?.solReceived || 0,
+        tokensSold,
+        solReceived,
         timestamp: Date.now(),
         fee: '0.5%',
         api: 'local',
@@ -223,8 +259,166 @@ export class PumpPortalExecutor {
   }
 
   // ------------------------------------------------------------------------
-  // DRY RUN SIMULATIONS
+  // HELPERS
   // ------------------------------------------------------------------------
+  async waitForConfirmation(signature) {
+    console.log('   ⏳ Waiting for confirmation...');
+
+    for (let i = 0; i < 30; i++) {
+      try {
+        const statusResp = await this.connection.getSignatureStatus(signature);
+        const value = statusResp.value;
+
+        if (value) {
+          // ❌ Si la TX falló on-chain, lo detectamos aquí
+          if (value.err) {
+            console.log(
+              `   ❌ On-chain error detected in status: ${JSON.stringify(
+                value.err,
+              )}`,
+            );
+            throw new Error('Transaction failed on-chain (status.err set)');
+          }
+
+          if (
+            value.confirmationStatus === 'confirmed' ||
+            value.confirmationStatus === 'finalized'
+          ) {
+            console.log(`   🎉 Confirmed after ${i + 1} attempts`);
+            return true;
+          }
+        }
+      } catch (e) {
+        console.log(
+          `   ⚠️ getSignatureStatus error (attempt ${i + 1}): ${e.message}`,
+        );
+      }
+
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+
+    console.warn('   ⚠️ Confirmation timeout (no explicit success/fail)');
+    return false;
+  }
+
+  async getTxDetails(signature) {
+    try {
+      const tx = await this.connection.getTransaction(signature, {
+        maxSupportedTransactionVersion: 0,
+        commitment: 'confirmed',
+      });
+
+      if (!tx) {
+        return {
+          failed: true,
+          error: 'Transaction not found',
+        };
+      }
+
+      if (tx.meta && tx.meta.err) {
+        return {
+          failed: true,
+          error: JSON.stringify(tx.meta.err),
+          logs: tx.meta.logMessages || [],
+        };
+      }
+
+      return this.parseTx(tx);
+    } catch (err) {
+      console.warn(`   ⚠️ Could not fetch tx details: ${err.message}`);
+      return {
+        failed: true,
+        error: err.message,
+      };
+    }
+  }
+
+  parseTx(tx) {
+    if (!tx || !tx.meta) {
+      return { failed: true, error: 'No meta in transaction' };
+    }
+
+    if (tx.meta.err) {
+      return {
+        failed: true,
+        error: JSON.stringify(tx.meta.err),
+        logs: tx.meta.logMessages || [],
+      };
+    }
+
+    let tokensDelta = 0;
+    let solDelta = 0;
+
+    // Cambios de tokens (suma de todos los cambios)
+    if (tx.meta.postTokenBalances && tx.meta.preTokenBalances) {
+      for (const postBal of tx.meta.postTokenBalances) {
+        const preBal = tx.meta.preTokenBalances.find(
+          (p) => p.accountIndex === postBal.accountIndex,
+        );
+
+        const preAmount = preBal?.uiTokenAmount?.uiAmount || 0;
+        const postAmount = postBal?.uiTokenAmount?.uiAmount || 0;
+
+        tokensDelta += postAmount - preAmount;
+      }
+    }
+
+    // Cambios de SOL para la wallet de este executor
+    if (tx.meta.postBalances && tx.meta.preBalances) {
+      const walletPubkey = this.wallet.publicKey.toBase58();
+
+      const staticKeys = tx.transaction.message.staticAccountKeys;
+      const legacyKeys = tx.transaction.message.accountKeys;
+
+      let walletIndex = -1;
+
+      if (Array.isArray(staticKeys) && staticKeys.length > 0) {
+        walletIndex = staticKeys.findIndex(
+          (k) => k.toBase58 && k.toBase58() === walletPubkey,
+        );
+      }
+
+      if (walletIndex === -1 && Array.isArray(legacyKeys)) {
+        walletIndex = legacyKeys.findIndex(
+          (k) => k.toBase58 && k.toBase58() === walletPubkey,
+        );
+      }
+
+      if (walletIndex >= 0) {
+        const preSOL = (tx.meta.preBalances[walletIndex] || 0) / 1e9;
+        const postSOL = (tx.meta.postBalances[walletIndex] || 0) / 1e9;
+        solDelta = postSOL - preSOL;
+      }
+    }
+
+    const tokensReceived = Math.abs(tokensDelta);
+    const tokensSold = tokensDelta < 0 ? Math.abs(tokensDelta) : 0;
+    const solReceived = solDelta > 0 ? solDelta : 0;
+
+    // ⚠️ Si no hay movimiento de tokens ni de SOL, considerarlo fallo
+    if (
+      (!tokensReceived || tokensReceived === 0) &&
+      (!tokensSold || tokensSold === 0) &&
+      (!solReceived || Math.abs(solReceived) < 1e-9)
+    ) {
+      return {
+        failed: true,
+        error: 'No token/SOL movement detected for wallet (likely failed tx)',
+        raw: {
+          tokensDelta,
+          solDelta,
+        },
+      };
+    }
+
+    return {
+      failed: false,
+      tokensReceived,
+      tokensSold,
+      solReceived,
+    };
+  }
+
   simulateBuy(mint, solAmount) {
     const avgPrice = 0.000001;
     const tokens = solAmount / avgPrice;
@@ -244,7 +438,7 @@ export class PumpPortalExecutor {
   }
 
   simulateSell(mint, amountTokens) {
-    // Si viene "100%" no sabemos el balance, así que solo devolvemos algo simbólico
+    // Si viene "100%" no sabemos el balance, devolvemos algo simbólico
     if (typeof amountTokens === 'string' && amountTokens.trim().endsWith('%')) {
       return {
         success: true,
@@ -277,106 +471,12 @@ export class PumpPortalExecutor {
     };
   }
 
-  // ------------------------------------------------------------------------
-  // HELPERS
-  // ------------------------------------------------------------------------
-  async waitForConfirmation(signature) {
-    console.log('   ⏳ Waiting for confirmation...');
-
-    for (let i = 0; i < 30; i++) {
-      try {
-        const status = await this.connection.getSignatureStatus(signature);
-
-        if (
-          status.value?.confirmationStatus === 'confirmed' ||
-          status.value?.confirmationStatus === 'finalized'
-        ) {
-          console.log(`   🎉 Confirmed after ${i + 1} attempts`);
-          return true;
-        }
-      } catch (e) {
-        // Ignorar errores temporales
-      }
-
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-
-    console.warn('   ⚠️ Confirmation timeout (may still succeed)');
-    return false;
-  }
-
-  async getTxDetails(signature) {
-    try {
-      const tx = await this.connection.getTransaction(signature, {
-        maxSupportedTransactionVersion: 0,
-        commitment: 'confirmed',
-      });
-      return this.parseTx(tx);
-    } catch (err) {
-      console.warn(`   ⚠️ Could not fetch tx details: ${err.message}`);
-      return null;
-    }
-  }
-
-  parseTx(tx) {
-    if (!tx || !tx.meta) return {};
-
-    let tokensDelta = 0;
-    let solReceived = 0;
-
-    // Parsear cambios de tokens (suma de todos los cambios)
-    if (tx.meta.postTokenBalances && tx.meta.preTokenBalances) {
-      for (const postBal of tx.meta.postTokenBalances) {
-        const preBal = tx.meta.preTokenBalances.find(
-          (p) => p.accountIndex === postBal.accountIndex,
-        );
-
-        const preAmount = preBal?.uiTokenAmount?.uiAmount || 0;
-        const postAmount = postBal?.uiTokenAmount?.uiAmount || 0;
-
-        tokensDelta += postAmount - preAmount;
-      }
-    }
-
-    // Parsear cambios de SOL para la wallet
-    if (tx.meta.postBalances && tx.meta.preBalances) {
-      const walletPubkey = this.wallet.publicKey.toBase58();
-
-      const staticKeys = tx.transaction.message.staticAccountKeys;
-      const legacyKeys = tx.transaction.message.accountKeys;
-
-      let walletIndex = -1;
-
-      if (Array.isArray(staticKeys) && staticKeys.length > 0) {
-        walletIndex = staticKeys.findIndex(
-          (k) => k.toBase58 && k.toBase58() === walletPubkey,
-        );
-      }
-
-      if (walletIndex === -1 && Array.isArray(legacyKeys)) {
-        walletIndex = legacyKeys.findIndex(
-          (k) => k.toBase58 && k.toBase58() === walletPubkey,
-        );
-      }
-
-      if (walletIndex >= 0) {
-        const preSOL = (tx.meta.preBalances[walletIndex] || 0) / 1e9;
-        const postSOL = (tx.meta.postBalances[walletIndex] || 0) / 1e9;
-        solReceived = postSOL - preSOL;
-      }
-    }
-
-    return {
-      tokensReceived: Math.abs(tokensDelta),
-      tokensSold: tokensDelta < 0 ? Math.abs(tokensDelta) : 0,
-      solReceived: solReceived,
-    };
-  }
-
   fakeSignature() {
-    const arr = new Uint8Array(64).map(() =>
-      Math.floor(Math.random() * 256),
-    );
-    return bs58.encode(arr);
+    const chars = 'abcdef0123456789';
+    let sig = '';
+    for (let i = 0; i < 88; i++) {
+      sig += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return sig;
   }
 }
