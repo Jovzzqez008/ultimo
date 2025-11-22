@@ -72,6 +72,46 @@ if (ENABLE_TRADING) {
   }
 }
 
+// 🔎 Helper: balance REAL on-chain de tu wallet para un mint
+async function getWalletTokenBalance(mint) {
+  try {
+    if (!pumpPortal || !pumpPortal.wallet) {
+      console.log('   ⚠️ getWalletTokenBalance: pumpPortal.wallet no disponible');
+      return 0;
+    }
+
+    const owner = pumpPortal.wallet.publicKey;
+    const mintPk = new PublicKey(mint);
+
+    const accounts = await connection.getTokenAccountsByOwner(owner, {
+      mint: mintPk,
+    });
+
+    if (!accounts.value.length) {
+      return 0;
+    }
+
+    const balanceInfo = await connection.getTokenAccountBalance(
+      accounts.value[0].pubkey,
+    );
+
+    const ui =
+      Number(balanceInfo.value.uiAmountString) ||
+      Number(balanceInfo.value.uiAmount) ||
+      0;
+
+    return ui || 0;
+  } catch (e) {
+    console.log(
+      `   ⚠️ Error reading on-chain token balance for ${mint.slice(
+        0,
+        8,
+      )}...: ${e.message}`,
+    );
+    return 0;
+  }
+}
+
 // Obtiene precio actual + valor en SOL usando PriceService (Pump.fun + Jupiter)
 async function calculateCurrentValue(mint, tokenAmount) {
   try {
@@ -203,9 +243,7 @@ async function evaluateHybridExit(position, currentPrice, pnlPercent, currentSol
       console.log(`\n🛡️ PHASE 2: WALLET EXIT + LOSS PROTECTION`);
       console.log(`   Hold time: ${Math.floor(holdTime / 1000)}s`);
       console.log(`   Wallet sold ${Math.floor(timeSinceSell / 1000)}s ago`);
-      console.log(
-        `   Current PnL: ${pnlPercent.toFixed(2)}% (NEGATIVE)`,
-      );
+      console.log(`   Current PnL: ${pnlPercent.toFixed(2)}% (NEGATIVE)`);
       console.log(`   🎯 Action: COPY EXIT (protect loss)`);
 
       return {
@@ -221,12 +259,8 @@ async function evaluateHybridExit(position, currentPrice, pnlPercent, currentSol
       console.log(`\n✋ PHASE 2: WALLET SOLD BUT HOLDING`);
       console.log(`   Hold time: ${Math.floor(holdTime / 1000)}s`);
       console.log(`   Wallet sold ${Math.floor(timeSinceSell / 1000)}s ago`);
-      console.log(
-        `   Current PnL: +${pnlPercent.toFixed(2)}% (POSITIVE)`,
-      );
-      console.log(
-        `   🎯 Action: IGNORE wallet exit, use trailing stop`,
-      );
+      console.log(`   Current PnL: +${pnlPercent.toFixed(2)}% (POSITIVE)`);
+      console.log(`   🎯 Action: IGNORE wallet exit, use trailing stop`);
 
       return { shouldExit: false, phase: 'phase2_holding' };
     }
@@ -239,9 +273,7 @@ async function evaluateHybridExit(position, currentPrice, pnlPercent, currentSol
     console.log(
       `   Current PnL: ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%`,
     );
-    console.log(
-      `   🎯 Action: IGNORE wallet exit, using trailing stop`,
-    );
+    console.log(`   🎯 Action: IGNORE wallet exit, using trailing stop`);
 
     return { shouldExit: false, phase: 'phase3_independent' };
   }
@@ -290,9 +322,7 @@ async function processCopySignals() {
 
       console.log(`   💰 Executing ${decision.mode} trade...`);
       console.log(`   💵 Price: $${currentPrice.toFixed(10)}`);
-      console.log(
-        `   📊 Amount: ${decision.amount.toFixed(4)} SOL`,
-      );
+      console.log(`   📊 Amount: ${decision.amount.toFixed(4)} SOL`);
 
       if (ENABLE_TRADING && pumpPortal && positionManager) {
         const buyResult = await pumpPortal.buyToken(
@@ -333,8 +363,7 @@ async function processCopySignals() {
             exitStrategy: 'hybrid_smart_exit',
           });
 
-          // 🔥 Cooldown POR MINT eliminado: ahora el bot puede recomprar
-          // el mismo token si copyStrategy lo permite, sin bloqueo extra.
+          // ❌ Sin cooldown por mint: puede recomprar si la estrategia lo permite
 
           if (process.env.TELEGRAM_OWNER_CHAT_ID) {
             try {
@@ -407,7 +436,7 @@ async function processSellSignals() {
       }
 
       const sellSignal = JSON.parse(signalJson);
-      const { mint, sellCount, sellers } = sellSignal;
+      const { mint, sellCount } = sellSignal;
 
       console.log(
         `\n📉 Processing sell signal for ${mint.slice(0, 8)}...`,
@@ -477,14 +506,16 @@ async function processSellSignals() {
 async function emergencyExit(position, currentPrice, approxSolValue) {
   try {
     const mint = position.mint;
-    const tokensAmount = parseInt(position.tokensAmount || position.tokenAmount || '0');
 
-    if (!tokensAmount || tokensAmount <= 0) {
+    // 🔥 Usar balance REAL on-chain
+    const tokensAmountUi = await getWalletTokenBalance(mint);
+
+    if (!tokensAmountUi || tokensAmountUi <= 0) {
       console.log(
-        `   ⚠️ [EMERGENCY EXIT] No tokens balance stored, cleaning Redis for ${mint.slice(
+        `   ⚠️ [EMERGENCY EXIT] Wallet has 0 balance for ${mint.slice(
           0,
           8,
-        )}...`,
+        )}... Cleaning Redis only.`,
       );
       await redis.srem('open_positions', mint);
       await redis.persist(`position:${mint}`);
@@ -500,7 +531,7 @@ async function emergencyExit(position, currentPrice, approxSolValue) {
     // Delay opcional para Jupiter tras graduación
     let useJupiter = isGraduatedFlag;
     const gradTimeStr = position.graduationTime;
-       const gradDelaySec = Number(
+    const gradDelaySec = Number(
       process.env.JUPITER_GRAD_DELAY_SEC || '0',
     );
 
@@ -523,19 +554,19 @@ async function emergencyExit(position, currentPrice, approxSolValue) {
     let executorLabel;
 
     if (!useJupiter) {
-      // VENDER en Pump.fun via PumpPortal
+      // VENDER en Pump.fun via PumpPortal (internamente "100%")
       sellResult = await pumpPortal.sellToken(
         mint,
-        tokensAmount,
+        tokensAmountUi,
         Number(process.env.COPY_SLIPPAGE || '10'),
         Number(process.env.PRIORITY_FEE || '0.0005'),
       );
       executorLabel = 'Pump.fun (PumpPortal Local API - 1.75%)';
     } else {
-      // VENDER en Jupiter
+      // VENDER en Jupiter usando balance real
       sellResult = await jupiterService.swapToken(
         mint,
-        tokensAmount,
+        tokensAmountUi,
         Number(process.env.JUPITER_SLIPPAGE_BPS || '500'),
       );
       executorLabel = 'Jupiter Ultra Swap (~0.3%)';
@@ -554,7 +585,7 @@ async function emergencyExit(position, currentPrice, approxSolValue) {
         );
         sellResult = await pumpPortal.sellToken(
           mint,
-          tokensAmount,
+          tokensAmountUi,
           Number(process.env.COPY_SLIPPAGE || '10'),
           Number(process.env.PRIORITY_FEE || '0.0005'),
         );
@@ -577,7 +608,7 @@ async function emergencyExit(position, currentPrice, approxSolValue) {
       sellResult.solReceived ?? sellResult.expectedSOL ?? 0;
 
     console.log(
-      `${mode} [EMERGENCY EXIT] SOLD ${tokensAmount} tokens of ${mint.slice(
+      `${mode} [EMERGENCY EXIT] SOLD ${tokensAmountUi} tokens of ${mint.slice(
         0,
         8,
       )}... via ${executorLabel}`,
@@ -655,7 +686,7 @@ async function monitorOpenPositions() {
           continue;
         }
 
-        // Tokens de la posición
+        // Tokens de la posición (para PnL; puede estar algo desfasado)
         const tokensAmount = Number(
           position.tokensAmount || position.tokenAmount || '0',
         );
@@ -815,7 +846,7 @@ async function monitorOpenPositions() {
           continue;
         }
 
-        // Evaluación de estrategia de salida
+        // Evaluación de estrategia de salida (TP / TS / SL)
         const exitDecision = await copyStrategy.shouldExit(
           position,
           currentPrice,
@@ -864,15 +895,28 @@ async function monitorOpenPositions() {
   }
 }
 
-// 🧠 AQUÍ VAN LOS CAMBIOS IMPORTANTES:
-// - Delay opcional después de la graduación antes de usar Jupiter
-// - Fallback a PumpPortal si Jupiter no tiene ruta o da 0x1789
+// 🧠 EXIT REAL: usa balance on-chain + PumpPortal/Jupiter
 async function executeSell(position, currentPrice, _currentSolValue, reason) {
   try {
-    const tokensAmount = parseInt(position.tokensAmount);
+    const mint = position.mint;
+
+    // 🔥 Usar SIEMPRE balance real on-chain
+    const tokensAmountUi = await getWalletTokenBalance(mint);
+
+    if (!tokensAmountUi || tokensAmountUi <= 0) {
+      console.log(
+        `   ⚠️ executeSell: wallet has 0 balance for ${mint.slice(
+          0,
+          8,
+        )}... Cleaning Redis only.`,
+      );
+      await redis.srem('open_positions', mint);
+      await redis.persist(`position:${mint}`);
+      return;
+    }
 
     // Obtener precio fresco y estado de graduación
-    const priceInfo = await priceService.getPrice(position.mint, {
+    const priceInfo = await priceService.getPrice(mint, {
       forceFresh: true,
     });
     const exitPrice =
@@ -904,20 +948,20 @@ async function executeSell(position, currentPrice, _currentSolValue, reason) {
     let executorLabel;
 
     if (!useJupiter) {
-      // ✅ VENTA EN PUMP.FUN via PumpPortal Local API
+      // ✅ VENTA EN PUMP.FUN via PumpPortal Local API (100% interno)
       sellResult = await pumpPortal.sellToken(
-        position.mint,
-        tokensAmount,
+        mint,
+        tokensAmountUi,
         Number(process.env.COPY_SLIPPAGE || '10'),
         Number(process.env.PRIORITY_FEE || '0.0005'),
       );
       executor = 'pumpportal';
       executorLabel = 'Pump.fun (PumpPortal Local API - 1.75%)';
     } else {
-      // ✅ VENTA EN JUPITER (TOKEN GRADUADO)
+      // ✅ VENTA EN JUPITER (TOKEN GRADUADO) usando balance real
       sellResult = await jupiterService.swapToken(
-        position.mint,
-        tokensAmount,
+        mint,
+        tokensAmountUi,
         Number(process.env.JUPITER_SLIPPAGE_BPS || '500'),
       );
       executor = 'jupiter';
@@ -938,8 +982,8 @@ async function executeSell(position, currentPrice, _currentSolValue, reason) {
         );
 
         sellResult = await pumpPortal.sellToken(
-          position.mint,
-          tokensAmount,
+          mint,
+          tokensAmountUi,
           Number(process.env.COPY_SLIPPAGE || '10'),
           Number(process.env.PRIORITY_FEE || '0.0005'),
         );
@@ -962,7 +1006,7 @@ async function executeSell(position, currentPrice, _currentSolValue, reason) {
       const pnlData = PnLCalculator.calculatePnL({
         entryPrice: parseFloat(position.entryPrice),
         exitPrice: exitPrice,
-        tokenAmount: tokensAmount,
+        tokenAmount: tokensAmountUi,
         solSpent: parseFloat(position.solAmount),
         executor: executor,
         slippage: 0, // En producción, calcular del resultado real
@@ -974,16 +1018,16 @@ async function executeSell(position, currentPrice, _currentSolValue, reason) {
       PnLCalculator.checkDiscrepancy({
         entryPrice: parseFloat(position.entryPrice),
         exitPrice: exitPrice,
-        tokenAmount: tokensAmount,
+        tokenAmount: tokensAmountUi,
         solSpent: parseFloat(position.solAmount),
         executor: executor,
       });
 
       // Cerrar posición con PnL correcto
       const closedPosition = await positionManager.closePosition(
-        position.mint,
+        mint,
         exitPrice,
-        tokensAmount,
+        tokensAmountUi,
         pnlData.netReceived, // Usar el valor neto calculado
         reason,
         sellResult.signature,
@@ -1013,7 +1057,7 @@ async function executeSell(position, currentPrice, _currentSolValue, reason) {
             `${emoji} ${mode} EXIT: ${
               reasonMap[reason] || reason
             }\n\n` +
-              `Token: ${position.mint.slice(0, 16)}...\n` +
+              `Token: ${mint.slice(0, 16)}...\n` +
               `Executor: ${executorLabel}\n` +
               `Hold: ${holdTime}s\n\n` +
               `Entry: $${parseFloat(
